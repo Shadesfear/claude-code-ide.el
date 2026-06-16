@@ -39,6 +39,7 @@
 (declare-function claude-code-ide-stop-all "claude-code-ide" (&optional all-projects))
 (declare-function claude-code-ide-rename-session "claude-code-ide" ())
 (declare-function claude-code-ide-list-sessions "claude-code-ide" ())
+(declare-function claude-code-ide-session-list "claude-code-ide-sessions" ())
 (declare-function claude-code-ide-switch-to-buffer "claude-code-ide" ())
 (declare-function claude-code-ide-insert-at-mentioned "claude-code-ide" ())
 (declare-function claude-code-ide-send-prompt "claude-code-ide" (&optional prompt session))
@@ -328,7 +329,8 @@
     ("q" "Stop instance" claude-code-ide-stop)
     ("Q" "Stop all instances" claude-code-ide-stop-all)
     ("R" "Rename instance" claude-code-ide-rename-session)
-    ("l" "List all sessions" claude-code-ide-list-sessions)]
+    ("l" "List all sessions" claude-code-ide-list-sessions)
+    ("L" "Session overview (dashboard)" claude-code-ide-session-list)]
    ["Navigation"
     ("b" "Switch to Claude buffer" claude-code-ide-switch-to-buffer)
     ("w" "Toggle project windows" claude-code-ide-toggle)

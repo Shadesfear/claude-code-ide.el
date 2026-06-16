@@ -65,6 +65,7 @@
 (require 'claude-code-ide-transient)
 (require 'claude-code-ide-mcp-server)
 (require 'claude-code-ide-emacs-tools)
+(require 'claude-code-ide-sessions)
 
 ;; External variable declarations
 (defvar eat-terminal)

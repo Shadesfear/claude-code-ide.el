@@ -1446,6 +1446,101 @@ next toggle, independent of which project the instances belong to."
           ;; Should NOT have switched
           (should (null tab-switched)))))))
 
+;;; Session Overview Tests
+
+(defun claude-code-ide-tests--register-session (dir &optional connected pid port)
+  "Register a fake live session for DIR in the process registry.
+CONNECTED, PID and PORT populate the matching MCP session fields.
+Return the spawned process so callers can delete it during cleanup."
+  (let ((proc (make-process :name (format "ccide-test-%s"
+                                          (file-name-nondirectory
+                                           (directory-file-name dir)))
+                            :command '("sleep" "30")
+                            :buffer nil)))
+    (puthash dir proc claude-code-ide--processes)
+    (puthash dir (make-claude-code-ide-mcp-session
+                  :project-dir dir
+                  :client (and connected :mock-client)
+                  :cli-pid (or pid 4321)
+                  :port (or port 51000))
+             claude-code-ide-mcp--sessions)
+    proc))
+
+(ert-deftest claude-code-ide-test-sessions-collect-empty ()
+  "Collecting sessions returns nil when none are registered."
+  (claude-code-ide-tests--clear-processes)
+  (should (null (claude-code-ide--collect-sessions)))
+  (should (null (claude-code-ide--session-list-entries))))
+
+(ert-deftest claude-code-ide-test-sessions-collect-and-entries ()
+  "Collected sessions render into the expected tabulated-list rows."
+  (claude-code-ide-tests--clear-processes)
+  (let (procs)
+    (unwind-protect
+        (progn
+          (push (claude-code-ide-tests--register-session "/tmp/ccide-a/" t 111 52001) procs)
+          (push (claude-code-ide-tests--register-session "/tmp/ccide-b/" nil 222 52002) procs)
+          (let* ((sessions (claude-code-ide--collect-sessions))
+                 (a (cl-find "/tmp/ccide-a/" sessions
+                             :key (lambda (s) (plist-get s :directory))
+                             :test #'equal)))
+            (should (= 2 (length sessions)))
+            (should (eq t (plist-get a :live)))
+            (should (eq t (plist-get a :connected)))
+            (should (= 111 (plist-get a :pid)))
+            (should (= 52001 (plist-get a :port))))
+          (let* ((entries (claude-code-ide--session-list-entries))
+                 (row (assoc "/tmp/ccide-b/" entries))
+                 (vec (cadr row)))
+            (should (= 2 (length entries)))
+            (should row)
+            (should (= 6 (length vec)))
+            (should (equal "ccide-b" (aref vec 0)))
+            (should (string-match-p "live" (aref vec 1)))
+            (should (string-match-p "no" (aref vec 2)))
+            (should (equal "222" (aref vec 3)))
+            (should (equal "52002" (aref vec 4)))))
+      (dolist (proc procs) (when (process-live-p proc) (delete-process proc)))
+      (claude-code-ide-tests--clear-processes))))
+
+(ert-deftest claude-code-ide-test-sessions-dead-process-rendered ()
+  "A dead process is reported as not live by the collector."
+  (claude-code-ide-tests--clear-processes)
+  (let ((proc (claude-code-ide-tests--register-session "/tmp/ccide-dead/")))
+    (unwind-protect
+        (progn
+          (delete-process proc)
+          (let ((session (car (claude-code-ide--collect-sessions))))
+            (should (null (plist-get session :live)))))
+      (claude-code-ide-tests--clear-processes))))
+
+(ert-deftest claude-code-ide-test-sessions-list-buffer-and-visit ()
+  "Opening the overview lists a session and visiting it shows its buffer."
+  (claude-code-ide-tests--clear-processes)
+  (let ((proc (claude-code-ide-tests--register-session "/tmp/ccide-c/" t 5 50500))
+        (sess-buffer (get-buffer-create
+                      (funcall claude-code-ide-buffer-name-function "/tmp/ccide-c/"))))
+    (unwind-protect
+        (save-window-excursion
+          (claude-code-ide-session-list)
+          (with-current-buffer claude-code-ide-session-list-buffer-name
+            (should (eq major-mode 'claude-code-ide-session-list-mode))
+            (goto-char (point-min))
+            (should (equal "/tmp/ccide-c/" (tabulated-list-get-id)))
+            (claude-code-ide-session-list-visit)
+            (should (get-buffer-window sess-buffer t))))
+      (when (process-live-p proc) (delete-process proc))
+      (when (buffer-live-p sess-buffer) (kill-buffer sess-buffer))
+      (when (get-buffer claude-code-ide-session-list-buffer-name)
+        (kill-buffer claude-code-ide-session-list-buffer-name))
+      (claude-code-ide-tests--clear-processes))))
+
+(ert-deftest claude-code-ide-test-sessions-visit-no-row-errors ()
+  "Visiting with point off any session row signals a `user-error'."
+  (with-temp-buffer
+    (claude-code-ide-session-list-mode)
+    (should-error (claude-code-ide-session-list-visit) :type 'user-error)))
+
 (defun claude-code-ide-run-tests ()
   "Run all claude-code-ide test cases."
   (interactive)

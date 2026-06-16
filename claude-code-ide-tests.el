@@ -1447,96 +1447,78 @@ next toggle, independent of which project the instances belong to."
           ;; Should NOT have switched
           (should (null tab-switched)))))))
 
-;;; Session Overview Tests
+;;; Agent Session Overview Tests
 
-(defun claude-code-ide-tests--register-session (dir &optional connected pid port)
-  "Register a fake live session for DIR in the process registry.
-CONNECTED, PID and PORT populate the matching MCP session fields.
-Return the spawned process so callers can delete it during cleanup."
-  (let ((proc (make-process :name (format "ccide-test-%s"
-                                          (file-name-nondirectory
-                                           (directory-file-name dir)))
-                            :command '("sleep" "30")
-                            :buffer nil)))
-    (puthash dir proc claude-code-ide--processes)
-    (puthash dir (make-claude-code-ide-mcp-session
-                  :project-dir dir
-                  :client (and connected :mock-client)
-                  :cli-pid (or pid 4321)
-                  :port (or port 51000))
-             claude-code-ide-mcp--sessions)
-    proc))
+(defconst claude-code-ide-tests--agents-json
+  (concat "[{\"pid\":16353,\"cwd\":\"/home/u/Projects/svc\",\"kind\":\"interactive\","
+          "\"startedAt\":1000,\"sessionId\":\"83070820-80d3-41a3-b361-3aee6c870399\","
+          "\"status\":\"busy\"},"
+          "{\"id\":\"d13c7473\",\"cwd\":\"/home/u\",\"kind\":\"background\","
+          "\"startedAt\":2000,\"sessionId\":\"d13c7473-3a4e-46c0-a59f-371737334bdb\","
+          "\"name\":\"design scope review\",\"state\":\"blocked\"}]")
+  "Sample `claude agents --json' output used by the overview tests.")
 
-(ert-deftest claude-code-ide-test-sessions-collect-empty ()
-  "Collecting sessions returns nil when none are registered."
-  (claude-code-ide-tests--clear-processes)
-  (should (null (claude-code-ide--collect-sessions)))
-  (should (null (claude-code-ide--session-list-entries))))
+(ert-deftest claude-code-ide-test-agents-parse ()
+  "JSON output parses into plists with keyword keys."
+  (let ((sessions (claude-code-ide--agents-parse
+                   claude-code-ide-tests--agents-json)))
+    (should (= 2 (length sessions)))
+    (let ((s (car sessions)))
+      (should (equal "interactive" (plist-get s :kind)))
+      (should (equal "83070820-80d3-41a3-b361-3aee6c870399"
+                     (plist-get s :sessionId)))
+      (should (equal "/home/u/Projects/svc" (plist-get s :cwd))))
+    (should (equal "design scope review"
+                   (plist-get (cadr sessions) :name)))))
 
-(ert-deftest claude-code-ide-test-sessions-collect-and-entries ()
-  "Collected sessions render into the expected tabulated-list rows."
-  (claude-code-ide-tests--clear-processes)
-  (let (procs)
-    (unwind-protect
-        (progn
-          (push (claude-code-ide-tests--register-session "/tmp/ccide-a/" t 111 52001) procs)
-          (push (claude-code-ide-tests--register-session "/tmp/ccide-b/" nil 222 52002) procs)
-          (let* ((sessions (claude-code-ide--collect-sessions))
-                 (a (cl-find "/tmp/ccide-a/" sessions
-                             :key (lambda (s) (plist-get s :directory))
-                             :test #'equal)))
-            (should (= 2 (length sessions)))
-            (should (eq t (plist-get a :live)))
-            (should (eq t (plist-get a :connected)))
-            (should (= 111 (plist-get a :pid)))
-            (should (= 52001 (plist-get a :port))))
-          (let* ((entries (claude-code-ide--session-list-entries))
-                 (row (assoc "/tmp/ccide-b/" entries))
-                 (vec (cadr row)))
-            (should (= 2 (length entries)))
-            (should row)
-            (should (= 6 (length vec)))
-            (should (equal "ccide-b" (aref vec 0)))
-            (should (string-match-p "live" (aref vec 1)))
-            (should (string-match-p "no" (aref vec 2)))
-            (should (equal "222" (aref vec 3)))
-            (should (equal "52002" (aref vec 4)))))
-      (dolist (proc procs) (when (process-live-p proc) (delete-process proc)))
-      (claude-code-ide-tests--clear-processes))))
+(ert-deftest claude-code-ide-test-agents-parse-empty-or-bad ()
+  "Empty or invalid JSON yields nil rather than erroring."
+  (should (null (claude-code-ide--agents-parse "")))
+  (should (null (claude-code-ide--agents-parse "   ")))
+  (should (null (claude-code-ide--agents-parse "not json"))))
 
-(ert-deftest claude-code-ide-test-sessions-dead-process-rendered ()
-  "A dead process is reported as not live by the collector."
-  (claude-code-ide-tests--clear-processes)
-  (let ((proc (claude-code-ide-tests--register-session "/tmp/ccide-dead/")))
-    (unwind-protect
-        (progn
-          (delete-process proc)
-          (let ((session (car (claude-code-ide--collect-sessions))))
-            (should (null (plist-get session :live)))))
-      (claude-code-ide-tests--clear-processes))))
+(ert-deftest claude-code-ide-test-agents-format-age ()
+  "Ages render in the largest fitting unit, with a guard for missing data."
+  (should (equal "-" (claude-code-ide--format-age nil 100)))
+  (should (equal "30s" (claude-code-ide--format-age 0 30)))
+  (should (equal "5m" (claude-code-ide--format-age 0 300)))
+  (should (equal "2h" (claude-code-ide--format-age 0 7200)))
+  (should (equal "3d" (claude-code-ide--format-age 0 (* 3 86400))))
+  ;; Clock skew (started in the future) clamps to 0s rather than negative.
+  (should (equal "0s" (claude-code-ide--format-age 10000 1))))
 
-(ert-deftest claude-code-ide-test-sessions-list-buffer-and-visit ()
-  "Opening the overview lists a session and visiting it shows its buffer."
-  (claude-code-ide-tests--clear-processes)
-  (let ((proc (claude-code-ide-tests--register-session "/tmp/ccide-c/" t 5 50500))
-        (sess-buffer (get-buffer-create
-                      (funcall claude-code-ide-buffer-name-function "/tmp/ccide-c/"))))
-    (unwind-protect
-        (save-window-excursion
-          (claude-code-ide-session-list)
-          (with-current-buffer claude-code-ide-session-list-buffer-name
-            (should (eq major-mode 'claude-code-ide-session-list-mode))
-            (goto-char (point-min))
-            (should (equal "/tmp/ccide-c/" (tabulated-list-get-id)))
-            (claude-code-ide-session-list-visit)
-            (should (get-buffer-window sess-buffer t))))
-      (when (process-live-p proc) (delete-process proc))
-      (when (buffer-live-p sess-buffer) (kill-buffer sess-buffer))
-      (when (get-buffer claude-code-ide-session-list-buffer-name)
-        (kill-buffer claude-code-ide-session-list-buffer-name))
-      (claude-code-ide-tests--clear-processes))))
+(ert-deftest claude-code-ide-test-agents-short-id ()
+  "Short id takes the leading 8 chars, with a guard for empty input."
+  (should (equal "83070820"
+                 (claude-code-ide--agent-short-id
+                  "83070820-80d3-41a3-b361-3aee6c870399")))
+  (should (equal "abc" (claude-code-ide--agent-short-id "abc")))
+  (should (equal "-" (claude-code-ide--agent-short-id nil)))
+  (should (equal "-" (claude-code-ide--agent-short-id ""))))
 
-(ert-deftest claude-code-ide-test-sessions-visit-no-row-errors ()
+(ert-deftest claude-code-ide-test-agents-entries-rendering ()
+  "Parsed sessions render into six-column rows carrying the session plist."
+  (let* ((sessions (claude-code-ide--agents-parse
+                    claude-code-ide-tests--agents-json))
+         (rows (claude-code-ide--session-list-entries-from sessions 10))
+         (interactive-row (car rows))
+         (background-row (cadr rows)))
+    (should (= 2 (length rows)))
+    ;; Row id is the session plist itself so commands can read its fields.
+    (should (equal "interactive" (plist-get (car interactive-row) :kind)))
+    (let ((vec (cadr interactive-row)))
+      (should (= 6 (length vec)))
+      ;; Interactive session has no name -> falls back to (dir basename).
+      (should (equal "(svc)" (aref vec 0)))
+      (should (equal "interactive" (aref vec 1)))
+      (should (string-match-p "busy" (aref vec 2)))
+      (should (equal "/home/u/Projects/svc" (aref vec 4)))
+      (should (equal "83070820" (aref vec 5))))
+    (let ((vec (cadr background-row)))
+      (should (equal "design scope review" (aref vec 0)))
+      (should (string-match-p "blocked" (aref vec 2))))))
+
+(ert-deftest claude-code-ide-test-agents-visit-no-row-errors ()
   "Visiting with point off any session row signals a `user-error'."
   (with-temp-buffer
     (claude-code-ide-session-list-mode)

@@ -208,15 +208,28 @@ Uses the configured `claude-code-ide-terminal-backend'."
          (with-current-buffer buffer
            (setq default-directory dir)
            (unless (eq major-mode 'eat-mode)
-             (eat-mode))
+             (eat-mode)))
+         ;; Display before exec so the terminal is created at the window's
+         ;; size; otherwise it starts mis-sized and a startup resize is
+         ;; sent once shown, which Claude Code's fullscreen TUI relayouts
+         ;; badly (jumpy output).
+         (pop-to-buffer buffer)
+         (with-current-buffer buffer
            (eat-exec buffer buffer-name cli nil args))
-         (pop-to-buffer buffer)))
+         buffer))
       ('ghostel
        (let ((buffer (get-buffer-create buffer-name)))
          (with-current-buffer buffer
-           (setq default-directory dir)
+           (setq default-directory dir))
+         ;; Display first: `ghostel-exec' sizes the terminal to the window
+         ;; showing BUFFER (or 80x24 when undisplayed).  Sizing it up front
+         ;; avoids the startup SIGWINCH that Claude Code's fullscreen TUI
+         ;; handles imperfectly (ghostel issue #192) -- the cause of the
+         ;; terminal staying mis-sized and the TUI bouncing.
+         (pop-to-buffer buffer)
+         (with-current-buffer buffer
            (ghostel-exec buffer cli args))
-         (pop-to-buffer buffer)))
+         buffer))
       (other
        (error "Unknown terminal backend: %s" other)))))
 

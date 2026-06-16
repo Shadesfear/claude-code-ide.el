@@ -1518,11 +1518,27 @@ next toggle, independent of which project the instances belong to."
       (should (equal "design scope review" (aref vec 0)))
       (should (string-match-p "blocked" (aref vec 2))))))
 
+(ert-deftest claude-code-ide-test-agents-enter-args ()
+  "Enter args resume interactive sessions but open the agent view for bg."
+  ;; Interactive -> resume by id.
+  (should (equal '("--resume" "abc-123")
+                 (claude-code-ide--agent-enter-args
+                  '(:kind "interactive" :sessionId "abc-123" :cwd "/p"))))
+  ;; Background -> native agent view filtered to the session directory.
+  (should (equal '("agents" "--cwd" "/p")
+                 (claude-code-ide--agent-enter-args
+                  '(:kind "background" :sessionId "abc-123" :cwd "/p"))))
+  ;; Background without a cwd -> bare agent view.
+  (should (equal '("agents")
+                 (claude-code-ide--agent-enter-args
+                  '(:kind "background" :sessionId "abc-123")))))
+
 (ert-deftest claude-code-ide-test-agents-visit-no-row-errors ()
-  "Visiting with point off any session row signals a `user-error'."
+  "Entering or forking with point off any session row signals a `user-error'."
   (with-temp-buffer
     (claude-code-ide-session-list-mode)
-    (should-error (claude-code-ide-session-list-visit) :type 'user-error)))
+    (should-error (claude-code-ide-session-list-visit) :type 'user-error)
+    (should-error (claude-code-ide-session-list-fork) :type 'user-error)))
 
 (defun claude-code-ide-run-tests ()
   "Run all claude-code-ide test cases."

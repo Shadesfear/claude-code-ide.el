@@ -35,7 +35,9 @@
 ;; Open it with `M-x claude-code-ide-session-list'.
 ;;
 ;; Key bindings inside the overview:
-;;   RET / o   resume (enter) the session at point in a terminal
+;;   RET / o   enter the session at point (resume interactive sessions;
+;;             open the native agent view to attach background agents)
+;;   f         fork a copy of the session at point
 ;;   g         refresh the list
 ;;   q         quit the overview window
 
@@ -186,20 +188,15 @@ Signal a `user-error' when point is not on a session row."
   (or (tabulated-list-get-id)
       (user-error "No Claude session on this line")))
 
-(defun claude-code-ide--agent-enter (session-id cwd)
-  "Resume Claude session SESSION-ID in a terminal rooted at CWD.
-Uses the configured `claude-code-ide-terminal-backend'.  This opens a
-fresh terminal that resumes the conversation; it does not attach to an
-already-running terminal of an external session."
+(defun claude-code-ide--agent-launch (buffer-name args dir)
+  "Run the Claude CLI with ARGS in terminal BUFFER-NAME rooted at DIR.
+Uses the configured `claude-code-ide-terminal-backend'."
   (claude-code-ide--terminal-ensure-backend)
   (let* ((cli (or claude-code-ide-cli-path "claude"))
          (dir (file-name-as-directory
-               (or (and (stringp cwd) (> (length cwd) 0) cwd)
+               (or (and (stringp dir) (> (length dir) 0) dir)
                    default-directory)))
-         (default-directory dir)
-         (buffer-name (format "*claude-agent[%s]*"
-                              (claude-code-ide--agent-short-id session-id)))
-         (args (list "--resume" session-id)))
+         (default-directory dir))
     (pcase claude-code-ide-terminal-backend
       ('vterm
        (let ((vterm-buffer-name buffer-name)
@@ -223,14 +220,54 @@ already-running terminal of an external session."
       (other
        (error "Unknown terminal backend: %s" other)))))
 
+(defun claude-code-ide--agent-enter-args (session)
+  "Return the Claude CLI args to enter SESSION.
+Interactive sessions resume by id (\"--resume ID\").  Background
+agents cannot be resumed directly, so this opens the native agent view
+\(\"agents\"), filtered to the session's directory, where the agent can
+be attached."
+  (let ((sid (plist-get session :sessionId))
+        (cwd (plist-get session :cwd)))
+    (if (equal (plist-get session :kind) "background")
+        (append (list "agents")
+                (when (and (stringp cwd) (> (length cwd) 0))
+                  (list "--cwd" cwd)))
+      (list "--resume" sid))))
+
 (defun claude-code-ide-session-list-visit ()
-  "Resume (enter) the Claude session on the current line in a terminal."
+  "Enter the Claude session on the current line.
+Interactive sessions are resumed by id in a terminal.  Background
+agents open the native agent view (`claude agents'), filtered to the
+session's directory, where you can attach to the running agent."
   (interactive)
   (let* ((session (claude-code-ide--session-at-point))
-         (session-id (plist-get session :sessionId)))
-    (unless (and (stringp session-id) (> (length session-id) 0))
+         (sid (plist-get session :sessionId))
+         (background (equal (plist-get session :kind) "background"))
+         (buffer-name (if background
+                          "*claude-agents*"
+                        (format "*claude-agent[%s]*"
+                                (claude-code-ide--agent-short-id sid)))))
+    (when (and (not background)
+               (not (and (stringp sid) (> (length sid) 0))))
       (user-error "Session on this line has no session id"))
-    (claude-code-ide--agent-enter session-id (plist-get session :cwd))))
+    (claude-code-ide--agent-launch buffer-name
+                                   (claude-code-ide--agent-enter-args session)
+                                   (plist-get session :cwd))))
+
+(defun claude-code-ide-session-list-fork ()
+  "Fork a copy of the Claude session on the current line into a terminal.
+Works for interactive and background sessions: the original keeps
+running while you drive an independent branch (\"--resume ID
+--fork-session\")."
+  (interactive)
+  (let* ((session (claude-code-ide--session-at-point))
+         (sid (plist-get session :sessionId)))
+    (unless (and (stringp sid) (> (length sid) 0))
+      (user-error "Session on this line has no session id"))
+    (claude-code-ide--agent-launch
+     (format "*claude-agent[%s-fork]*" (claude-code-ide--agent-short-id sid))
+     (list "--resume" sid "--fork-session")
+     (plist-get session :cwd))))
 
 (defun claude-code-ide--session-list-cancel-timer ()
   "Cancel the auto-refresh timer for the current overview buffer."
@@ -263,6 +300,7 @@ already-running terminal of an external session."
   :doc "Keymap for `claude-code-ide-session-list-mode'."
   "RET" #'claude-code-ide-session-list-visit
   "o"   #'claude-code-ide-session-list-visit
+  "f"   #'claude-code-ide-session-list-fork
   "g"   #'claude-code-ide-session-list-refresh)
 
 (define-derived-mode claude-code-ide-session-list-mode tabulated-list-mode

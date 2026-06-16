@@ -40,19 +40,13 @@
 
 (require 'cl-lib)
 (require 'tabulated-list)
-
-;; Forward declarations to avoid a circular dependency on the main file,
-;; mirroring the approach used in claude-code-ide-transient.el.
-(defvar claude-code-ide--processes)
-(defvar claude-code-ide--session-ids)
-(defvar claude-code-ide-buffer-name-function)
-(defvar claude-code-ide-mcp--sessions)
-(declare-function claude-code-ide--cleanup-dead-processes "claude-code-ide" ())
-(declare-function claude-code-ide--display-buffer-in-side-window "claude-code-ide" (buffer))
-(declare-function claude-code-ide-log "claude-code-ide-debug" (format-string &rest args))
-(declare-function claude-code-ide-mcp-session-port "claude-code-ide-mcp" (session))
-(declare-function claude-code-ide-mcp-session-client "claude-code-ide-mcp" (session))
-(declare-function claude-code-ide-mcp-session-cli-pid "claude-code-ide-mcp" (session))
+;; Loading this overview pulls in the core package: the autoload entry
+;; point for `claude-code-ide-session-list' must bring the session
+;; registry and helpers (`claude-code-ide--cleanup-dead-processes' etc.)
+;; with it.  The core package does not require this file, so there is no
+;; load cycle.  The MCP session accessors arrive transitively via
+;; claude-code-ide -> claude-code-ide-mcp.
+(require 'claude-code-ide)
 
 (defcustom claude-code-ide-session-list-auto-refresh-interval nil
   "Seconds between automatic refreshes of the session overview buffer.

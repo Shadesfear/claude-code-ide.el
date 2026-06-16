@@ -36,7 +36,7 @@
 ;;
 ;; Key bindings inside the overview:
 ;;   RET / o   enter the session at point (resume interactive sessions;
-;;             open the native agent view to attach background agents)
+;;             attach to background agents with `claude attach')
 ;;   f         fork a copy of the session at point
 ;;   g         refresh the list
 ;;   q         quit the overview window
@@ -233,35 +233,41 @@ Uses the configured `claude-code-ide-terminal-backend'."
       (other
        (error "Unknown terminal backend: %s" other)))))
 
+(defun claude-code-ide--agent-attach-id (session)
+  "Return the id used to attach to SESSION with `claude attach'.
+Prefers the short :id shown in the overview, falling back to the
+full :sessionId.  Returns nil when neither is available."
+  (let ((id (plist-get session :id))
+        (sid (plist-get session :sessionId)))
+    (cond ((and (stringp id) (> (length id) 0)) id)
+          ((and (stringp sid) (> (length sid) 0)) sid))))
+
 (defun claude-code-ide--agent-enter-args (session)
   "Return the Claude CLI args to enter SESSION.
 Interactive sessions resume by id (\"--resume ID\").  Background
-agents cannot be resumed directly, so this opens the native agent view
-\(\"agents\"), filtered to the session's directory, where the agent can
-be attached."
-  (let ((sid (plist-get session :sessionId))
-        (cwd (plist-get session :cwd)))
-    (if (equal (plist-get session :kind) "background")
-        (append (list "agents")
-                (when (and (stringp cwd) (> (length cwd) 0))
-                  (list "--cwd" cwd)))
-      (list "--resume" sid))))
+agents attach to the running session in this terminal (\"attach ID\"),
+using the id shown in the overview, so the live agent is entered
+directly; detach with C-z to leave it running."
+  (if (equal (plist-get session :kind) "background")
+      (list "attach" (claude-code-ide--agent-attach-id session))
+    (list "--resume" (plist-get session :sessionId))))
 
 (defun claude-code-ide-session-list-visit ()
   "Enter the Claude session on the current line.
 Interactive sessions are resumed by id in a terminal.  Background
-agents open the native agent view (`claude agents'), filtered to the
-session's directory, where you can attach to the running agent."
+agents are attached to in this terminal (`claude attach ID') using the
+id shown in the overview, so the live agent is entered directly;
+detach with C-z to leave it running."
   (interactive)
   (let* ((session (claude-code-ide--session-at-point))
-         (sid (plist-get session :sessionId))
          (background (equal (plist-get session :kind) "background"))
-         (buffer-name (if background
-                          "*claude-agents*"
-                        (format "*claude-agent[%s]*"
-                                (claude-code-ide--agent-short-id sid)))))
-    (when (and (not background)
-               (not (and (stringp sid) (> (length sid) 0))))
+         (id (if background
+                 (claude-code-ide--agent-attach-id session)
+               (plist-get session :sessionId)))
+         (buffer-name (format "*claude-agent[%s]*"
+                              (claude-code-ide--agent-short-id
+                               (or (plist-get session :sessionId) id)))))
+    (unless (and (stringp id) (> (length id) 0))
       (user-error "Session on this line has no session id"))
     (claude-code-ide--agent-launch buffer-name
                                    (claude-code-ide--agent-enter-args session)
@@ -335,8 +341,9 @@ running while you drive an independent branch (\"--resume ID
 (defun claude-code-ide-session-list ()
   "Display a live overview of all Claude Code sessions on this machine.
 Sessions are read from the native agent view (`claude agents --json'),
-including ones started outside Emacs.  Press RET on a row to resume
-that session in a terminal."
+including ones started outside Emacs.  Press RET on a row to enter that
+session in a terminal (resume interactive sessions, attach to background
+agents)."
   (interactive)
   (let ((buffer (get-buffer-create claude-code-ide-session-list-buffer-name)))
     (with-current-buffer buffer

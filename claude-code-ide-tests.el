@@ -1519,17 +1519,18 @@ next toggle, independent of which project the instances belong to."
       (should (string-match-p "blocked" (aref vec 2))))))
 
 (ert-deftest claude-code-ide-test-agents-enter-args ()
-  "Enter args resume interactive sessions but open the agent view for bg."
+  "Enter args resume interactive sessions and attach to background ones."
   ;; Interactive -> resume by id.
   (should (equal '("--resume" "abc-123")
                  (claude-code-ide--agent-enter-args
                   '(:kind "interactive" :sessionId "abc-123" :cwd "/p"))))
-  ;; Background -> native agent view filtered to the session directory.
-  (should (equal '("agents" "--cwd" "/p")
+  ;; Background -> attach by the short id shown in the overview.
+  (should (equal '("attach" "abc12345")
                  (claude-code-ide--agent-enter-args
-                  '(:kind "background" :sessionId "abc-123" :cwd "/p"))))
-  ;; Background without a cwd -> bare agent view.
-  (should (equal '("agents")
+                  '(:kind "background" :id "abc12345"
+                    :sessionId "abc12345-0000-0000" :cwd "/p"))))
+  ;; Background without a short :id -> fall back to the session id.
+  (should (equal '("attach" "abc-123")
                  (claude-code-ide--agent-enter-args
                   '(:kind "background" :sessionId "abc-123")))))
 

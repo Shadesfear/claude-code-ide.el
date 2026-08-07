@@ -74,6 +74,17 @@ This passes the --all flag to `claude agents --json'."
   :type 'boolean
   :group 'claude-code-ide)
 
+(defcustom claude-code-ide-session-list-kinds '("background")
+  "Session kinds the overview shows, or nil for every kind.
+`claude agents' manages background agents, and its TUI lists only
+those.  `claude agents --json' also reports interactive sessions, which
+are the Claude processes already attached to a terminal elsewhere.  The
+overview filters to background agents so it agrees with the CLI."
+  :type '(choice (const :tag "Background agents only" ("background"))
+                 (const :tag "Every kind" nil)
+                 (repeat :tag "Named kinds" string))
+  :group 'claude-code-ide)
+
 (defcustom claude-code-ide-session-cache-max-age 5
   "Seconds a cached session list stays fresh enough to reuse.
 `claude-code-ide-session-find' reuses the cache within this window
@@ -243,6 +254,17 @@ Combines the :state and :status fields and colors by liveness."
       (substring session-id 0 (min 8 (length session-id)))
     "-"))
 
+(defun claude-code-ide--visible-sessions (sessions)
+  "Return the members of SESSIONS the overview should show.
+Filters on `claude-code-ide-session-list-kinds'.  Applied to the cache
+rather than the fetch, so widening the filter needs no new CLI call."
+  (if (null claude-code-ide-session-list-kinds)
+      sessions
+    (seq-filter (lambda (session)
+                  (member (plist-get session :kind)
+                          claude-code-ide-session-list-kinds))
+                sessions)))
+
 (defun claude-code-ide--session-row-name (session)
   "Return the label for SESSION, falling back to its directory basename."
   (let ((name (plist-get session :name))
@@ -286,7 +308,7 @@ the full six, dropping the directory and session id that will not fit."
 Reads `claude-code-ide--session-cache' rather than calling the CLI, so
 redisplay stays synchronous and cheap.  Ages recompute on every print."
   (claude-code-ide--session-list-entries-from
-   claude-code-ide--session-cache
+   (claude-code-ide--visible-sessions claude-code-ide--session-cache)
    (float-time)
    claude-code-ide--session-list-compact))
 
@@ -361,6 +383,22 @@ ignored rather than queued."
                (claude-code-ide--agents-store sessions)
                (let ((inhibit-read-only t))
                  (tabulated-list-print t t))))))))
+
+(defun claude-code-ide-session-list-toggle-scope ()
+  "Widen the overview to every session, or narrow it back to agents.
+The narrow scope matches the `claude agents' TUI: background agents
+that have not finished.  The wide scope adds interactive sessions and
+completed ones.  Widening needs a fresh fetch because completed
+sessions only arrive with the CLI's --all flag."
+  (interactive)
+  (let ((widen (and claude-code-ide-session-list-kinds t)))
+    (setq claude-code-ide-session-list-kinds (if widen nil '("background"))
+          claude-code-ide-session-list-include-completed widen
+          ;; --all changes the command, so the cached answer no longer applies.
+          claude-code-ide--session-cache-time nil)
+    (message "Claude sessions: %s"
+             (if widen "every session" "background agents"))
+    (claude-code-ide-session-list-refresh)))
 
 (defun claude-code-ide--session-at-point ()
   "Return the session plist on the current overview row.
@@ -502,7 +540,8 @@ the overview, and enters the chosen one in a terminal.  Reuses a cache
 younger than `claude-code-ide-session-cache-max-age', so this is
 instant while the sidebar is polling."
   (interactive)
-  (let ((sessions (claude-code-ide--sessions-now)))
+  (let ((sessions (claude-code-ide--visible-sessions
+                   (claude-code-ide--sessions-now))))
     (unless sessions
       (user-error "No Claude sessions found"))
     (let* ((now (float-time))
@@ -562,6 +601,7 @@ no timer."
   "RET" #'claude-code-ide-session-list-visit
   "o"   #'claude-code-ide-session-list-visit
   "f"   #'claude-code-ide-session-list-fork
+  "a"   #'claude-code-ide-session-list-toggle-scope
   "g"   #'claude-code-ide-session-list-refresh)
 
 (define-derived-mode claude-code-ide-session-list-mode tabulated-list-mode

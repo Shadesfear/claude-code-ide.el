@@ -1581,10 +1581,13 @@ next toggle, independent of which project the instances belong to."
   "Rows come from the cache, so redisplay never shells out to the CLI."
   (with-temp-buffer
     (claude-code-ide-session-list-mode)
-    (should (null (claude-code-ide--session-list-entries)))
-    (setq claude-code-ide--session-cache
-          (claude-code-ide--agents-parse claude-code-ide-tests--agents-json))
-    (should (= 2 (length (claude-code-ide--session-list-entries))))))
+    ;; Unfiltered, so this measures the cache rather than the kind filter.
+    (let ((claude-code-ide-session-list-kinds nil)
+          (claude-code-ide--session-cache nil))
+      (should (null (claude-code-ide--session-list-entries)))
+      (setq claude-code-ide--session-cache
+            (claude-code-ide--agents-parse claude-code-ide-tests--agents-json))
+      (should (= 2 (length (claude-code-ide--session-list-entries)))))))
 
 (ert-deftest claude-code-ide-test-agents-refresh-skips-when-in-flight ()
   "A refresh started while one is running does not spawn a second process."
@@ -1723,6 +1726,51 @@ next toggle, independent of which project the instances belong to."
   "The finder reports an empty agent view rather than prompting."
   (cl-letf (((symbol-function 'claude-code-ide--sessions-now) (lambda () nil)))
     (should-error (claude-code-ide-session-find) :type 'user-error)))
+
+(ert-deftest claude-code-ide-test-agents-visible-sessions-filter ()
+  "The overview shows background agents by default, every kind when nil."
+  (let ((sessions (claude-code-ide--agents-parse
+                   claude-code-ide-tests--agents-json)))
+    ;; The fixture holds one interactive and one background session.
+    (let ((claude-code-ide-session-list-kinds '("background")))
+      (let ((visible (claude-code-ide--visible-sessions sessions)))
+        (should (= 1 (length visible)))
+        (should (equal "background" (plist-get (car visible) :kind)))))
+    (let ((claude-code-ide-session-list-kinds nil))
+      (should (= 2 (length (claude-code-ide--visible-sessions sessions)))))
+    (let ((claude-code-ide-session-list-kinds '("interactive" "background")))
+      (should (= 2 (length (claude-code-ide--visible-sessions sessions)))))))
+
+(ert-deftest claude-code-ide-test-agents-entries-respect-kind-filter ()
+  "Rendered rows honour the kind filter."
+  (with-temp-buffer
+    (claude-code-ide-session-list-mode)
+    (let ((claude-code-ide--session-cache
+           (claude-code-ide--agents-parse claude-code-ide-tests--agents-json)))
+      (let ((claude-code-ide-session-list-kinds '("background")))
+        (should (= 1 (length (claude-code-ide--session-list-entries)))))
+      (let ((claude-code-ide-session-list-kinds nil))
+        (should (= 2 (length (claude-code-ide--session-list-entries))))))))
+
+(ert-deftest claude-code-ide-test-agents-toggle-scope ()
+  "Toggling scope flips both the kind filter and the completed flag."
+  (let ((claude-code-ide-session-list-kinds '("background"))
+        (claude-code-ide-session-list-include-completed nil)
+        (claude-code-ide--session-cache-time (float-time))
+        (refreshed 0))
+    (cl-letf (((symbol-function 'claude-code-ide-session-list-refresh)
+               (lambda () (setq refreshed (1+ refreshed)))))
+      (claude-code-ide-session-list-toggle-scope)
+      (should (null claude-code-ide-session-list-kinds))
+      (should claude-code-ide-session-list-include-completed)
+      ;; --all changes the command, so the cache must be invalidated.
+      (should (null claude-code-ide--session-cache-time))
+      (should (= 1 refreshed))
+
+      (claude-code-ide-session-list-toggle-scope)
+      (should (equal '("background") claude-code-ide-session-list-kinds))
+      (should (null claude-code-ide-session-list-include-completed))
+      (should (= 2 refreshed)))))
 
 (ert-deftest claude-code-ide-test-agents-command-includes-all-flag ()
   "The --all flag follows `claude-code-ide-session-list-include-completed'."

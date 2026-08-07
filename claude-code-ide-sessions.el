@@ -406,15 +406,31 @@ Signal a `user-error' when point is not on a session row."
   (or (tabulated-list-get-id)
       (user-error "No Claude session on this line")))
 
-(defun claude-code-ide--agent-launch (buffer-name args dir)
+(defun claude-code-ide--same-window-action ()
+  "Return a `display-buffer' action reusing the selected window, or nil.
+Returns nil when the selected window is a side window or is dedicated,
+since taking those over would evict the sidebar or another session
+rather than the buffer the user was looking at."
+  (let ((window (selected-window)))
+    (unless (or (window-parameter window 'window-side)
+                (window-dedicated-p window))
+      '((display-buffer-same-window) (inhibit-same-window . nil)))))
+
+(defun claude-code-ide--agent-launch (buffer-name args dir &optional same-window)
   "Run the Claude CLI with ARGS in terminal BUFFER-NAME rooted at DIR.
-Uses the configured `claude-code-ide-terminal-backend'."
+Uses the configured `claude-code-ide-terminal-backend'.  With
+SAME-WINDOW, show the terminal in the selected window instead of letting
+`display-buffer-alist' place it, falling back to the usual placement
+when the selected window cannot be taken over."
   (claude-code-ide--terminal-ensure-backend)
   (let* ((cli (or claude-code-ide-cli-path "claude"))
          (dir (file-name-as-directory
                (or (and (stringp dir) (> (length dir) 0) dir)
                    default-directory)))
-         (default-directory dir))
+         (default-directory dir)
+         (display-buffer-overriding-action
+          (or (and same-window (claude-code-ide--same-window-action))
+              display-buffer-overriding-action)))
     (pcase claude-code-ide-terminal-backend
       ('vterm
        (let ((vterm-buffer-name buffer-name)
@@ -470,11 +486,12 @@ directly; detach with C-z to leave it running."
       (list "attach" (claude-code-ide--agent-attach-id session))
     (list "--resume" (plist-get session :sessionId))))
 
-(defun claude-code-ide--session-enter (session)
+(defun claude-code-ide--session-enter (session &optional same-window)
   "Enter SESSION in a terminal buffer.
 Interactive sessions are resumed by id.  Background agents are attached
 to (`claude attach ID'), so the live agent is entered directly; detach
-with C-z to leave it running."
+with C-z to leave it running.  SAME-WINDOW reuses the selected window
+rather than the side window `display-buffer-alist' would pick."
   (let* ((background (equal (plist-get session :kind) "background"))
          (id (if background
                  (claude-code-ide--agent-attach-id session)
@@ -486,7 +503,8 @@ with C-z to leave it running."
       (user-error "Session has no session id"))
     (claude-code-ide--agent-launch buffer-name
                                    (claude-code-ide--agent-enter-args session)
-                                   (plist-get session :cwd))))
+                                   (plist-get session :cwd)
+                                   same-window)))
 
 (defun claude-code-ide-session-list-visit ()
   "Enter the Claude session on the current line."
@@ -558,7 +576,7 @@ instant while the sidebar is polling."
            (session (cdr (assoc choice candidates))))
       (unless session
         (user-error "No session matched %S" choice))
-      (claude-code-ide--session-enter session))))
+      (claude-code-ide--session-enter session t))))
 
 (defun claude-code-ide--session-list-cancel-timer ()
   "Cancel the auto-refresh timer for the current overview buffer."

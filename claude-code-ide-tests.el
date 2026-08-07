@@ -1714,13 +1714,49 @@ next toggle, independent of which project the instances belong to."
     (cl-letf (((symbol-function 'claude-code-ide--sessions-now)
                (lambda () sessions))
               ((symbol-function 'claude-code-ide--session-enter)
-               (lambda (session) (setq entered session)))
+               (lambda (session &optional _same-window) (setq entered session)))
               ;; Pick the blocked row, which sorts first.
               ((symbol-function 'completing-read)
                (lambda (_prompt table &rest _)
                  (car (all-completions "" table)))))
       (claude-code-ide-session-find)
       (should (equal "design scope review" (plist-get entered :name))))))
+
+(ert-deftest claude-code-ide-test-agents-same-window-action ()
+  "Ordinary windows are reusable; side and dedicated windows are not."
+  (let ((window (selected-window)))
+    (should (claude-code-ide--same-window-action))
+    ;; A dedicated window belongs to its buffer, so leave it alone.
+    (set-window-dedicated-p window t)
+    (should (null (claude-code-ide--same-window-action)))
+    (set-window-dedicated-p window nil)
+    ;; Same for a side window, which is the sidebar's case.
+    (set-window-parameter window 'window-side 'left)
+    (should (null (claude-code-ide--same-window-action)))
+    (set-window-parameter window 'window-side nil)
+    (should (claude-code-ide--same-window-action))))
+
+(ert-deftest claude-code-ide-test-agents-find-uses-current-window ()
+  "The finder enters in the selected window; the overview does not."
+  (let ((sessions (claude-code-ide--agents-parse
+                   claude-code-ide-tests--agents-json))
+        (same-window 'unset))
+    (cl-letf (((symbol-function 'claude-code-ide--sessions-now)
+               (lambda () sessions))
+              ((symbol-function 'claude-code-ide--agent-launch)
+               (lambda (_name _args _dir &optional sw) (setq same-window sw)))
+              ((symbol-function 'completing-read)
+               (lambda (_prompt table &rest _) (car (all-completions "" table)))))
+      (let ((claude-code-ide-session-list-kinds nil))
+        (claude-code-ide-session-find))
+      (should (eq t same-window))
+
+      ;; RET in the overview keeps the side-window placement.
+      (setq same-window 'unset)
+      (with-temp-buffer
+        (claude-code-ide-session-list-mode)
+        (claude-code-ide--session-enter (car sessions)))
+      (should (null same-window)))))
 
 (ert-deftest claude-code-ide-test-agents-find-without-sessions ()
   "The finder reports an empty agent view rather than prompting."

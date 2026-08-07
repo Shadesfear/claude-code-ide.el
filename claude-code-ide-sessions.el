@@ -74,11 +74,45 @@ This passes the --all flag to `claude agents --json'."
   :type 'boolean
   :group 'claude-code-ide)
 
+(defcustom claude-code-ide-session-list-sidebar-side 'left
+  "Side of the frame used by the agent overview sidebar."
+  :type '(choice (const :tag "Left" left)
+                 (const :tag "Right" right))
+  :group 'claude-code-ide)
+
+(defcustom claude-code-ide-session-list-sidebar-width 40
+  "Width in columns of the agent overview sidebar."
+  :type 'integer
+  :group 'claude-code-ide)
+
+(defcustom claude-code-ide-session-list-sidebar-refresh-interval 5
+  "Seconds between refreshes while the overview sidebar is visible.
+The timer only runs while the sidebar is displayed, and each refresh
+runs `claude agents --json' asynchronously so Emacs never blocks on it.
+Set to nil to refresh the sidebar manually."
+  :type '(choice (const :tag "Manual only" nil)
+                 (number :tag "Seconds"))
+  :group 'claude-code-ide)
+
 (defconst claude-code-ide-session-list-buffer-name "*Claude Agents*"
   "Name of the buffer used for the Claude Code agent overview.")
 
+(defconst claude-code-ide-session-list-sidebar-buffer-name "*Claude Agents Sidebar*"
+  "Name of the buffer used for the agent overview sidebar.")
+
 (defvar-local claude-code-ide--session-list-timer nil
   "Auto-refresh timer local to a session overview buffer.")
+
+(defvar-local claude-code-ide--session-list-compact nil
+  "When non-nil, render the overview with the narrow sidebar columns.")
+
+(defvar-local claude-code-ide--session-cache nil
+  "Sessions from the last completed fetch, rendered by the overview.
+Holds the plists returned by `claude-code-ide--agents-parse'.  The
+overview draws from this cache so redisplay never blocks on the CLI.")
+
+(defvar-local claude-code-ide--session-fetch-process nil
+  "In-flight `claude agents --json' process for this overview buffer.")
 
 (defun claude-code-ide--agents-parse (output)
   "Parse OUTPUT of `claude agents --json' into a list of plists.
@@ -93,26 +127,45 @@ Return nil when OUTPUT is empty or not valid JSON."
           (and (listp parsed) parsed))
       (error nil))))
 
-(defun claude-code-ide--agents-fetch ()
-  "Return the list of Claude sessions from `claude agents --json'.
-Each element is a plist describing one session.  Signals a
-`user-error' when the CLI is missing or the command fails."
+(defun claude-code-ide--agents-command ()
+  "Return the CLI program and arguments used to list sessions."
   (let ((cli (or (and (boundp 'claude-code-ide-cli-path) claude-code-ide-cli-path)
                  "claude")))
     (unless (executable-find cli)
       (user-error "Claude Code CLI not found: %s" cli))
-    (let ((args (append (list "agents" "--json")
-                        (when claude-code-ide-session-list-include-completed
-                          (list "--all"))))
-          (output nil)
-          (status nil))
-      (with-temp-buffer
-        (setq status (apply #'call-process cli nil t nil args))
-        (setq output (buffer-string)))
-      (unless (eq status 0)
-        (user-error "`%s agents --json' failed (exit %s): %s"
-                    cli status (string-trim output)))
-      (claude-code-ide--agents-parse output))))
+    (append (list cli "agents" "--json")
+            (when claude-code-ide-session-list-include-completed
+              (list "--all")))))
+
+(defun claude-code-ide--agents-fetch-async (buffer callback)
+  "Fetch sessions for BUFFER and call CALLBACK inside it when done.
+CALLBACK receives SESSIONS and ERROR: on success SESSIONS is the parsed
+list and ERROR is nil, on failure SESSIONS is nil and ERROR is a string.
+The CLI call takes roughly half a second, so it runs in a subprocess
+rather than blocking redisplay.  Returns the process."
+  (let* ((command (claude-code-ide--agents-command))
+         (stdout (generate-new-buffer " *claude-agents-json*")))
+    (make-process
+     :name "claude-agents"
+     :buffer stdout
+     :command command
+     :noquery t
+     :connection-type 'pipe
+     :sentinel
+     (lambda (process _event)
+       (when (memq (process-status process) '(exit signal))
+         (let ((status (process-exit-status process))
+               (output (with-current-buffer stdout (buffer-string))))
+           (kill-buffer stdout)
+           (when (buffer-live-p buffer)
+             (with-current-buffer buffer
+               (if (eq status 0)
+                   (funcall callback (claude-code-ide--agents-parse output) nil)
+                 (funcall callback
+                          nil
+                          (format "`%s agents --json' failed (exit %s): %s"
+                                  (car command) status
+                                  (string-trim output))))))))))))
 
 (defun claude-code-ide--format-age (started-ms now-seconds)
   "Return a short human age for START-MS relative to NOW-SECONDS.
@@ -144,10 +197,12 @@ Combines the :state and :status fields and colors by liveness."
       (substring session-id 0 (min 8 (length session-id)))
     "-"))
 
-(defun claude-code-ide--session-list-entries-from (sessions now-seconds)
+(defun claude-code-ide--session-list-entries-from (sessions now-seconds &optional compact)
   "Build `tabulated-list-entries' rows from SESSIONS at NOW-SECONDS.
-SESSIONS is a list of plists as returned by `claude-code-ide--agents-fetch'.
-The entry id is the session plist itself so commands can read its fields."
+SESSIONS is a list of plists as returned by `claude-code-ide--agents-parse'.
+The entry id is the session plist itself so commands can read its fields.
+With COMPACT, emit the three narrow columns used by the sidebar instead of
+the full six, dropping the directory and session id that will not fit."
   (mapcar
    (lambda (session)
      (let* ((cwd (or (plist-get session :cwd) ""))
@@ -160,27 +215,71 @@ The entry id is the session plist itself so commands can read its fields."
                                         (file-name-nondirectory
                                          (directory-file-name cwd))
                                       "session")
-                                    ")"))))
+                                    ")")))
+            (state (claude-code-ide--agent-state-cell session))
+            (age (claude-code-ide--format-age (plist-get session :startedAt)
+                                              now-seconds)))
        (list session
-             (vector
-              display-name
-              kind
-              (claude-code-ide--agent-state-cell session)
-              (claude-code-ide--format-age (plist-get session :startedAt) now-seconds)
-              (if (> (length cwd) 0) (abbreviate-file-name cwd) "-")
-              (claude-code-ide--agent-short-id (plist-get session :sessionId))))))
+             (if compact
+                 (vector display-name state age)
+               (vector
+                display-name
+                kind
+                state
+                age
+                (if (> (length cwd) 0) (abbreviate-file-name cwd) "-")
+                (claude-code-ide--agent-short-id (plist-get session :sessionId)))))))
    sessions))
 
 (defun claude-code-ide--session-list-entries ()
-  "Fetch sessions and build rows for the overview."
+  "Build overview rows from the last completed fetch.
+Reads `claude-code-ide--session-cache' rather than calling the CLI, so
+redisplay stays synchronous and cheap.  Ages recompute on every print."
   (claude-code-ide--session-list-entries-from
-   (claude-code-ide--agents-fetch)
-   (float-time)))
+   claude-code-ide--session-cache
+   (float-time)
+   claude-code-ide--session-list-compact))
+
+(defconst claude-code-ide--session-list-format-full
+  [("Name" 28 t)
+   ("Kind" 6 t)
+   ("State" 9 t)
+   ("Age" 6 t)
+   ("Directory" 32 t)
+   ("Session" 8 nil)]
+  "Column layout for the overview in a normal window.")
+
+(defconst claude-code-ide--session-list-format-compact
+  [("Name" 22 t)
+   ("State" 9 t)
+   ("Age" 5 t)]
+  "Column layout for the overview in a narrow sidebar.")
+
+(defun claude-code-ide--session-list-apply-format ()
+  "Install the column layout matching `claude-code-ide--session-list-compact'."
+  (setq tabulated-list-format
+        (if claude-code-ide--session-list-compact
+            claude-code-ide--session-list-format-compact
+          claude-code-ide--session-list-format-full))
+  (tabulated-list-init-header))
 
 (defun claude-code-ide-session-list-refresh ()
-  "Redraw the session overview from the current agent state."
+  "Refresh the session overview from the agent view.
+The CLI runs asynchronously and the table redraws when it returns, so
+this never blocks.  A refresh started while one is already in flight is
+ignored rather than queued."
   (interactive)
-  (tabulated-list-print t))
+  (unless (process-live-p claude-code-ide--session-fetch-process)
+    (setq claude-code-ide--session-fetch-process
+          (claude-code-ide--agents-fetch-async
+           (current-buffer)
+           (lambda (sessions error)
+             (setq claude-code-ide--session-fetch-process nil)
+             (if error
+                 (message "%s" error)
+               (setq claude-code-ide--session-cache sessions)
+               (let ((inhibit-read-only t))
+                 (tabulated-list-print t t))))))))
 
 (defun claude-code-ide--session-at-point ()
   "Return the session plist on the current overview row.
@@ -294,26 +393,35 @@ running while you drive an independent branch (\"--resume ID
     (cancel-timer claude-code-ide--session-list-timer))
   (setq claude-code-ide--session-list-timer nil))
 
-(defun claude-code-ide--session-list-tick (buffer)
-  "Refresh the overview in BUFFER, or cancel the timer if it is gone."
-  (if (buffer-live-p buffer)
-      (with-current-buffer buffer
-        (when (derived-mode-p 'claude-code-ide-session-list-mode)
-          (ignore-errors (claude-code-ide-session-list-refresh))))
-    (cancel-timer claude-code-ide--session-list-timer)))
+(defun claude-code-ide--session-list-start-timer (interval)
+  "Refresh the current overview buffer every INTERVAL seconds while visible.
+The timer cancels itself once the buffer stops being displayed, so a
+closed sidebar costs nothing.  A nil or non-positive INTERVAL starts
+no timer."
+  (claude-code-ide--session-list-cancel-timer)
+  (when (and (numberp interval) (> interval 0))
+    (let ((buffer (current-buffer))
+          (timer nil))
+      (setq timer
+            (run-at-time
+             interval interval
+             (lambda ()
+               (if (and (buffer-live-p buffer) (get-buffer-window buffer t))
+                   (with-current-buffer buffer
+                     (when (derived-mode-p 'claude-code-ide-session-list-mode)
+                       (ignore-errors (claude-code-ide-session-list-refresh))))
+                 (cancel-timer timer)
+                 (when (buffer-live-p buffer)
+                   (with-current-buffer buffer
+                     (setq claude-code-ide--session-list-timer nil)))))))
+      (setq claude-code-ide--session-list-timer timer)
+      (add-hook 'kill-buffer-hook
+                #'claude-code-ide--session-list-cancel-timer nil t))))
 
 (defun claude-code-ide--session-list-maybe-start-timer ()
   "Start the auto-refresh timer when an interval is configured."
-  (claude-code-ide--session-list-cancel-timer)
-  (when (and claude-code-ide-session-list-auto-refresh-interval
-             (> claude-code-ide-session-list-auto-refresh-interval 0))
-    (setq claude-code-ide--session-list-timer
-          (run-at-time claude-code-ide-session-list-auto-refresh-interval
-                       claude-code-ide-session-list-auto-refresh-interval
-                       #'claude-code-ide--session-list-tick
-                       (current-buffer)))
-    (add-hook 'kill-buffer-hook
-              #'claude-code-ide--session-list-cancel-timer nil t)))
+  (claude-code-ide--session-list-start-timer
+   claude-code-ide-session-list-auto-refresh-interval))
 
 (defvar-keymap claude-code-ide-session-list-mode-map
   :doc "Keymap for `claude-code-ide-session-list-mode'."
@@ -325,17 +433,10 @@ running while you drive an independent branch (\"--resume ID
 (define-derived-mode claude-code-ide-session-list-mode tabulated-list-mode
   "CC-Agents"
   "Major mode for an overview of all Claude Code agent sessions."
-  (setq tabulated-list-format
-        [("Name" 28 t)
-         ("Kind" 6 t)
-         ("State" 9 t)
-         ("Age" 6 t)
-         ("Directory" 32 t)
-         ("Session" 8 nil)]
-        tabulated-list-padding 2
+  (setq tabulated-list-padding 2
         tabulated-list-sort-key (cons "Name" nil)
         tabulated-list-entries #'claude-code-ide--session-list-entries)
-  (tabulated-list-init-header))
+  (claude-code-ide--session-list-apply-format))
 
 ;;;###autoload
 (defun claude-code-ide-session-list ()
@@ -347,10 +448,57 @@ agents)."
   (interactive)
   (let ((buffer (get-buffer-create claude-code-ide-session-list-buffer-name)))
     (with-current-buffer buffer
-      (claude-code-ide-session-list-mode)
+      (unless (derived-mode-p 'claude-code-ide-session-list-mode)
+        (claude-code-ide-session-list-mode))
+      (setq claude-code-ide--session-list-compact nil)
+      (claude-code-ide--session-list-apply-format)
       (tabulated-list-print t)
-      (claude-code-ide--session-list-maybe-start-timer))
+      (claude-code-ide--session-list-maybe-start-timer)
+      (claude-code-ide-session-list-refresh))
     (pop-to-buffer buffer)))
+
+;;;###autoload
+(defun claude-code-ide-session-list-sidebar ()
+  "Show the agent overview in a side window and keep it refreshed.
+The sidebar uses the narrow column layout and polls every
+`claude-code-ide-session-list-sidebar-refresh-interval' seconds while it
+stays visible.  Returns the sidebar window."
+  (interactive)
+  (let ((buffer (get-buffer-create claude-code-ide-session-list-sidebar-buffer-name)))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'claude-code-ide-session-list-mode)
+        (claude-code-ide-session-list-mode))
+      (setq claude-code-ide--session-list-compact t)
+      (claude-code-ide--session-list-apply-format)
+      (tabulated-list-print t))
+    (let ((window (display-buffer-in-side-window
+                   buffer
+                   `((side . ,claude-code-ide-session-list-sidebar-side)
+                     (slot . 0)
+                     (window-width . ,claude-code-ide-session-list-sidebar-width)
+                     (preserve-size . (t . nil))
+                     (window-parameters . ((no-delete-other-windows . t)))))))
+      (when window
+        (set-window-dedicated-p window t)
+        (with-current-buffer buffer
+          (claude-code-ide--session-list-start-timer
+           claude-code-ide-session-list-sidebar-refresh-interval)
+          (claude-code-ide-session-list-refresh)))
+      window)))
+
+;;;###autoload
+(defun claude-code-ide-session-list-sidebar-toggle ()
+  "Toggle the agent overview sidebar.
+Closing it stops the refresh timer."
+  (interactive)
+  (let* ((buffer (get-buffer claude-code-ide-session-list-sidebar-buffer-name))
+         (window (and buffer (get-buffer-window buffer t))))
+    (if window
+        (progn
+          (with-current-buffer buffer
+            (claude-code-ide--session-list-cancel-timer))
+          (delete-window window))
+      (claude-code-ide-session-list-sidebar))))
 
 (provide 'claude-code-ide-sessions)
 

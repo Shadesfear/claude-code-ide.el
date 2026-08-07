@@ -1541,6 +1541,90 @@ next toggle, independent of which project the instances belong to."
     (should-error (claude-code-ide-session-list-visit) :type 'user-error)
     (should-error (claude-code-ide-session-list-fork) :type 'user-error)))
 
+(ert-deftest claude-code-ide-test-agents-entries-compact ()
+  "Compact rows keep name, state and age, dropping directory and id."
+  (let* ((sessions (claude-code-ide--agents-parse
+                    claude-code-ide-tests--agents-json))
+         (rows (claude-code-ide--session-list-entries-from sessions 10 t))
+         (vec (cadr (car rows))))
+    (should (= 2 (length rows)))
+    (should (= 3 (length vec)))
+    (should (equal "(svc)" (aref vec 0)))
+    (should (string-match-p "busy" (aref vec 1)))
+    ;; Third column is the age, not the kind that sits there in full rows.
+    (should (equal "9s" (aref vec 2)))
+    (should (string-match-p "blocked" (aref (cadr (cadr rows)) 1)))))
+
+(ert-deftest claude-code-ide-test-agents-format-matches-row-width ()
+  "Each column layout has as many columns as the rows it renders."
+  (let ((sessions (claude-code-ide--agents-parse
+                   claude-code-ide-tests--agents-json)))
+    (should (= (length claude-code-ide--session-list-format-full)
+               (length (cadr (car (claude-code-ide--session-list-entries-from
+                                   sessions 10 nil))))))
+    (should (= (length claude-code-ide--session-list-format-compact)
+               (length (cadr (car (claude-code-ide--session-list-entries-from
+                                   sessions 10 t))))))))
+
+(ert-deftest claude-code-ide-test-agents-apply-format ()
+  "Applying the format follows the buffer-local compact flag."
+  (with-temp-buffer
+    (claude-code-ide-session-list-mode)
+    (should (equal claude-code-ide--session-list-format-full
+                   tabulated-list-format))
+    (setq claude-code-ide--session-list-compact t)
+    (claude-code-ide--session-list-apply-format)
+    (should (equal claude-code-ide--session-list-format-compact
+                   tabulated-list-format))))
+
+(ert-deftest claude-code-ide-test-agents-entries-use-cache ()
+  "Rows come from the cache, so redisplay never shells out to the CLI."
+  (with-temp-buffer
+    (claude-code-ide-session-list-mode)
+    (should (null (claude-code-ide--session-list-entries)))
+    (setq claude-code-ide--session-cache
+          (claude-code-ide--agents-parse claude-code-ide-tests--agents-json))
+    (should (= 2 (length (claude-code-ide--session-list-entries))))))
+
+(ert-deftest claude-code-ide-test-agents-refresh-skips-when-in-flight ()
+  "A refresh started while one is running does not spawn a second process."
+  (with-temp-buffer
+    (claude-code-ide-session-list-mode)
+    (let ((spawned 0))
+      (cl-letf (((symbol-function 'claude-code-ide--agents-fetch-async)
+                 (lambda (&rest _) (setq spawned (1+ spawned)) 'fake-process))
+                ((symbol-function 'process-live-p)
+                 (lambda (process) (eq process 'fake-process))))
+        (claude-code-ide-session-list-refresh)
+        (should (= 1 spawned))
+        ;; The stub process reports as live, so the second call is a no-op.
+        (claude-code-ide-session-list-refresh)
+        (should (= 1 spawned))))))
+
+(ert-deftest claude-code-ide-test-agents-timer-not-started-without-interval ()
+  "A nil or non-positive refresh interval starts no timer."
+  (with-temp-buffer
+    (claude-code-ide-session-list-mode)
+    (claude-code-ide--session-list-start-timer nil)
+    (should (null claude-code-ide--session-list-timer))
+    (claude-code-ide--session-list-start-timer 0)
+    (should (null claude-code-ide--session-list-timer))
+    (claude-code-ide--session-list-start-timer 5)
+    (should (timerp claude-code-ide--session-list-timer))
+    (claude-code-ide--session-list-cancel-timer)
+    (should (null claude-code-ide--session-list-timer))))
+
+(ert-deftest claude-code-ide-test-agents-command-includes-all-flag ()
+  "The --all flag follows `claude-code-ide-session-list-include-completed'."
+  (cl-letf (((symbol-function 'executable-find) (lambda (_) "/usr/bin/claude")))
+    (let ((claude-code-ide-cli-path "claude"))
+      (let ((claude-code-ide-session-list-include-completed nil))
+        (should (equal '("claude" "agents" "--json")
+                       (claude-code-ide--agents-command))))
+      (let ((claude-code-ide-session-list-include-completed t))
+        (should (equal '("claude" "agents" "--json" "--all")
+                       (claude-code-ide--agents-command)))))))
+
 (defun claude-code-ide-run-tests ()
   "Run all claude-code-ide test cases."
   (interactive)

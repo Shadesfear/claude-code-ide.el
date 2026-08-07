@@ -74,6 +74,15 @@ This passes the --all flag to `claude agents --json'."
   :type 'boolean
   :group 'claude-code-ide)
 
+(defcustom claude-code-ide-session-cache-max-age 5
+  "Seconds a cached session list stays fresh enough to reuse.
+`claude-code-ide-session-find' reuses the cache within this window
+instead of paying for another CLI call, which costs about half a
+second.  An open sidebar refreshes the cache on its own timer, so the
+finder usually opens instantly."
+  :type 'number
+  :group 'claude-code-ide)
+
 (defcustom claude-code-ide-session-list-sidebar-side 'left
   "Side of the frame used by the agent overview sidebar."
   :type '(choice (const :tag "Left" left)
@@ -106,10 +115,15 @@ Set to nil to refresh the sidebar manually."
 (defvar-local claude-code-ide--session-list-compact nil
   "When non-nil, render the overview with the narrow sidebar columns.")
 
-(defvar-local claude-code-ide--session-cache nil
-  "Sessions from the last completed fetch, rendered by the overview.
+(defvar claude-code-ide--session-cache nil
+  "Sessions from the last completed fetch.
 Holds the plists returned by `claude-code-ide--agents-parse'.  The
-overview draws from this cache so redisplay never blocks on the CLI.")
+overview draws from this cache so redisplay never blocks on the CLI.
+Shared rather than buffer-local: there is one agent view per machine,
+so the sidebar's polling keeps the finder's data warm too.")
+
+(defvar claude-code-ide--session-cache-time nil
+  "Value of `float-time' when `claude-code-ide--session-cache' was filled.")
 
 (defvar-local claude-code-ide--session-fetch-process nil
   "In-flight `claude agents --json' process for this overview buffer.")
@@ -136,6 +150,38 @@ Return nil when OUTPUT is empty or not valid JSON."
     (append (list cli "agents" "--json")
             (when claude-code-ide-session-list-include-completed
               (list "--all")))))
+
+(defun claude-code-ide--agents-store (sessions)
+  "Record SESSIONS as the current cache and return them."
+  (setq claude-code-ide--session-cache sessions
+        claude-code-ide--session-cache-time (float-time))
+  sessions)
+
+(defun claude-code-ide--agents-fetch-sync ()
+  "Fetch and cache the session list, blocking until the CLI returns.
+Used where a result is needed before the command can continue, such as
+building the completion table.  Signals a `user-error' when the CLI
+fails."
+  (let* ((command (claude-code-ide--agents-command))
+         (output nil)
+         (status nil))
+    (with-temp-buffer
+      (setq status (apply #'call-process (car command) nil t nil (cdr command)))
+      (setq output (buffer-string)))
+    (unless (eq status 0)
+      (user-error "`%s agents --json' failed (exit %s): %s"
+                  (car command) status (string-trim output)))
+    (claude-code-ide--agents-store (claude-code-ide--agents-parse output))))
+
+(defun claude-code-ide--sessions-now ()
+  "Return the session list, reusing the cache while it is fresh.
+Falls back to a synchronous fetch once the cache is older than
+`claude-code-ide-session-cache-max-age'."
+  (if (and claude-code-ide--session-cache-time
+           (< (- (float-time) claude-code-ide--session-cache-time)
+              claude-code-ide-session-cache-max-age))
+      claude-code-ide--session-cache
+    (claude-code-ide--agents-fetch-sync)))
 
 (defun claude-code-ide--agents-fetch-async (buffer callback)
   "Fetch sessions for BUFFER and call CALLBACK inside it when done.
@@ -197,6 +243,18 @@ Combines the :state and :status fields and colors by liveness."
       (substring session-id 0 (min 8 (length session-id)))
     "-"))
 
+(defun claude-code-ide--session-row-name (session)
+  "Return the label for SESSION, falling back to its directory basename."
+  (let ((name (plist-get session :name))
+        (cwd (or (plist-get session :cwd) "")))
+    (if (and (stringp name) (> (length name) 0))
+        name
+      (concat "("
+              (if (> (length cwd) 0)
+                  (file-name-nondirectory (directory-file-name cwd))
+                "session")
+              ")"))))
+
 (defun claude-code-ide--session-list-entries-from (sessions now-seconds &optional compact)
   "Build `tabulated-list-entries' rows from SESSIONS at NOW-SECONDS.
 SESSIONS is a list of plists as returned by `claude-code-ide--agents-parse'.
@@ -206,16 +264,8 @@ the full six, dropping the directory and session id that will not fit."
   (mapcar
    (lambda (session)
      (let* ((cwd (or (plist-get session :cwd) ""))
-            (name (plist-get session :name))
             (kind (or (plist-get session :kind) ""))
-            (display-name (if (and (stringp name) (> (length name) 0))
-                              name
-                            (concat "("
-                                    (if (> (length cwd) 0)
-                                        (file-name-nondirectory
-                                         (directory-file-name cwd))
-                                      "session")
-                                    ")")))
+            (display-name (claude-code-ide--session-row-name session))
             (state (claude-code-ide--agent-state-cell session))
             (age (claude-code-ide--format-age (plist-get session :startedAt)
                                               now-seconds)))
@@ -255,19 +305,21 @@ Sessions whose state is not listed sort after all of these.")
   (let ((label (or (plist-get session :state) (plist-get session :status) "")))
     (or (cdr (assoc-string label claude-code-ide--session-state-order t)) 5)))
 
-(defun claude-code-ide--session-sort-predicate (a b)
-  "Return non-nil when overview entry A sorts before B.
-Orders by state rank first, then newest session first within a state.
-A and B are `tabulated-list-entries' elements whose car is the session
-plist, so this reads the raw fields rather than the rendered columns."
-  (let* ((sa (car a))
-         (sb (car b))
-         (ra (claude-code-ide--session-state-rank sa))
-         (rb (claude-code-ide--session-state-rank sb)))
+(defun claude-code-ide--session-less-p (a b)
+  "Return non-nil when session A sorts before session B.
+Orders by state rank first, then newest session first within a state."
+  (let ((ra (claude-code-ide--session-state-rank a))
+        (rb (claude-code-ide--session-state-rank b)))
     (if (/= ra rb)
         (< ra rb)
-      (> (or (plist-get sa :startedAt) 0)
-         (or (plist-get sb :startedAt) 0)))))
+      (> (or (plist-get a :startedAt) 0)
+         (or (plist-get b :startedAt) 0)))))
+
+(defun claude-code-ide--session-sort-predicate (a b)
+  "Return non-nil when overview entry A sorts before B.
+A and B are `tabulated-list-entries' elements whose car is the session
+plist, so this reads the raw fields rather than the rendered columns."
+  (claude-code-ide--session-less-p (car a) (car b)))
 
 (defconst claude-code-ide--session-list-format-full
   [("Name" 28 t)
@@ -306,7 +358,7 @@ ignored rather than queued."
              (setq claude-code-ide--session-fetch-process nil)
              (if error
                  (message "%s" error)
-               (setq claude-code-ide--session-cache sessions)
+               (claude-code-ide--agents-store sessions)
                (let ((inhibit-read-only t))
                  (tabulated-list-print t t))))))))
 
@@ -380,15 +432,12 @@ directly; detach with C-z to leave it running."
       (list "attach" (claude-code-ide--agent-attach-id session))
     (list "--resume" (plist-get session :sessionId))))
 
-(defun claude-code-ide-session-list-visit ()
-  "Enter the Claude session on the current line.
-Interactive sessions are resumed by id in a terminal.  Background
-agents are attached to in this terminal (`claude attach ID') using the
-id shown in the overview, so the live agent is entered directly;
-detach with C-z to leave it running."
-  (interactive)
-  (let* ((session (claude-code-ide--session-at-point))
-         (background (equal (plist-get session :kind) "background"))
+(defun claude-code-ide--session-enter (session)
+  "Enter SESSION in a terminal buffer.
+Interactive sessions are resumed by id.  Background agents are attached
+to (`claude attach ID'), so the live agent is entered directly; detach
+with C-z to leave it running."
+  (let* ((background (equal (plist-get session :kind) "background"))
          (id (if background
                  (claude-code-ide--agent-attach-id session)
                (plist-get session :sessionId)))
@@ -396,10 +445,15 @@ detach with C-z to leave it running."
                               (claude-code-ide--agent-short-id
                                (or (plist-get session :sessionId) id)))))
     (unless (and (stringp id) (> (length id) 0))
-      (user-error "Session on this line has no session id"))
+      (user-error "Session has no session id"))
     (claude-code-ide--agent-launch buffer-name
                                    (claude-code-ide--agent-enter-args session)
                                    (plist-get session :cwd))))
+
+(defun claude-code-ide-session-list-visit ()
+  "Enter the Claude session on the current line."
+  (interactive)
+  (claude-code-ide--session-enter (claude-code-ide--session-at-point)))
 
 (defun claude-code-ide-session-list-fork ()
   "Fork a copy of the Claude session on the current line into a terminal.
@@ -415,6 +469,57 @@ running while you drive an independent branch (\"--resume ID
      (format "*claude-agent[%s-fork]*" (claude-code-ide--agent-short-id sid))
      (list "--resume" sid "--fork-session")
      (plist-get session :cwd))))
+
+(defun claude-code-ide--session-candidate (session now-seconds)
+  "Return the completion line for SESSION at NOW-SECONDS.
+Name, state, age and directory all sit in one string so a fuzzy
+completion style can match on any of them."
+  (let ((cwd (or (plist-get session :cwd) "")))
+    (format "%-44s  %-8s %-4s  %s"
+            (truncate-string-to-width
+             (claude-code-ide--session-row-name session) 44 nil nil t)
+            (or (plist-get session :state) (plist-get session :status) "")
+            (claude-code-ide--format-age (plist-get session :startedAt) now-seconds)
+            (if (> (length cwd) 0) (abbreviate-file-name cwd) "-"))))
+
+(defun claude-code-ide--session-completion-table (candidates)
+  "Return a completion table over CANDIDATES preserving their order.
+CANDIDATES is an alist of display string to session plist.  The table
+declines to re-sort so the state-then-age ranking survives into the
+minibuffer."
+  (lambda (string predicate action)
+    (if (eq action 'metadata)
+        '(metadata (category . claude-code-ide-session)
+                   (display-sort-function . identity)
+                   (cycle-sort-function . identity))
+      (complete-with-action action candidates string predicate))))
+
+;;;###autoload
+(defun claude-code-ide-session-find ()
+  "Pick a Claude session by name and enter it.
+Completes over every session in the agent view, ranked the same way as
+the overview, and enters the chosen one in a terminal.  Reuses a cache
+younger than `claude-code-ide-session-cache-max-age', so this is
+instant while the sidebar is polling."
+  (interactive)
+  (let ((sessions (claude-code-ide--sessions-now)))
+    (unless sessions
+      (user-error "No Claude sessions found"))
+    (let* ((now (float-time))
+           (candidates
+            (mapcar (lambda (session)
+                      (cons (claude-code-ide--session-candidate session now)
+                            session))
+                    (sort (copy-sequence sessions)
+                          #'claude-code-ide--session-less-p)))
+           (choice (completing-read
+                    "Claude session: "
+                    (claude-code-ide--session-completion-table candidates)
+                    nil t))
+           (session (cdr (assoc choice candidates))))
+      (unless session
+        (user-error "No session matched %S" choice))
+      (claude-code-ide--session-enter session))))
 
 (defun claude-code-ide--session-list-cancel-timer ()
   "Cancel the auto-refresh timer for the current overview buffer."

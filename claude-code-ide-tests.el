@@ -1652,6 +1652,78 @@ next toggle, independent of which project the instances belong to."
         (should (eq 'claude-code-ide--session-sort-predicate
                     (nth 2 state-column)))))))
 
+(ert-deftest claude-code-ide-test-agents-candidate-line ()
+  "A completion line carries name, state, age and directory."
+  (let* ((sessions (claude-code-ide--agents-parse
+                    claude-code-ide-tests--agents-json))
+         (line (claude-code-ide--session-candidate (cadr sessions) 10)))
+    (should (string-match-p "design scope review" line))
+    (should (string-match-p "blocked" line))
+    (should (string-match-p "8s" line))
+    (should (string-match-p "/home/u" line))))
+
+(ert-deftest claude-code-ide-test-agents-candidate-truncates-long-names ()
+  "Very long session names do not blow out the completion line."
+  (let ((line (claude-code-ide--session-candidate
+               (list :name (make-string 200 ?x) :cwd "/p" :state "done")
+               10)))
+    ;; 44 columns of name plus the fixed state/age/dir tail.
+    (should (< (length line) 80))
+    (should (string-match-p "/p" line))))
+
+(ert-deftest claude-code-ide-test-agents-completion-table-preserves-order ()
+  "The completion table declines to re-sort candidates."
+  (let* ((candidates '(("zebra" . (:name "zebra")) ("alpha" . (:name "alpha"))))
+         (table (claude-code-ide--session-completion-table candidates))
+         (metadata (funcall table "" nil 'metadata)))
+    (should (eq 'identity (cdr (assq 'display-sort-function (cdr metadata)))))
+    (should (eq 'claude-code-ide-session (cdr (assq 'category (cdr metadata)))))
+    ;; The table still completes normally.
+    (should (equal '("zebra" "alpha")
+                   (funcall table "" nil t)))))
+
+(ert-deftest claude-code-ide-test-agents-sessions-now-uses-fresh-cache ()
+  "A fresh cache is reused; a stale one triggers a fetch."
+  (let ((claude-code-ide-session-cache-max-age 5)
+        (fetches 0))
+    (cl-letf (((symbol-function 'claude-code-ide--agents-fetch-sync)
+               (lambda () (setq fetches (1+ fetches)) '(:fetched))))
+      (let ((claude-code-ide--session-cache '((:name "cached")))
+            (claude-code-ide--session-cache-time (float-time)))
+        (should (equal '((:name "cached")) (claude-code-ide--sessions-now)))
+        (should (= 0 fetches)))
+      ;; Older than max-age -> refetch.
+      (let ((claude-code-ide--session-cache '((:name "cached")))
+            (claude-code-ide--session-cache-time (- (float-time) 60)))
+        (should (equal '(:fetched) (claude-code-ide--sessions-now)))
+        (should (= 1 fetches)))
+      ;; Never fetched -> fetch.
+      (let ((claude-code-ide--session-cache nil)
+            (claude-code-ide--session-cache-time nil))
+        (should (equal '(:fetched) (claude-code-ide--sessions-now)))
+        (should (= 2 fetches))))))
+
+(ert-deftest claude-code-ide-test-agents-find-enters-choice ()
+  "Choosing a line enters the session behind it, not a lookalike."
+  (let* ((sessions (claude-code-ide--agents-parse
+                    claude-code-ide-tests--agents-json))
+         (entered nil))
+    (cl-letf (((symbol-function 'claude-code-ide--sessions-now)
+               (lambda () sessions))
+              ((symbol-function 'claude-code-ide--session-enter)
+               (lambda (session) (setq entered session)))
+              ;; Pick the blocked row, which sorts first.
+              ((symbol-function 'completing-read)
+               (lambda (_prompt table &rest _)
+                 (car (all-completions "" table)))))
+      (claude-code-ide-session-find)
+      (should (equal "design scope review" (plist-get entered :name))))))
+
+(ert-deftest claude-code-ide-test-agents-find-without-sessions ()
+  "The finder reports an empty agent view rather than prompting."
+  (cl-letf (((symbol-function 'claude-code-ide--sessions-now) (lambda () nil)))
+    (should-error (claude-code-ide-session-find) :type 'user-error)))
+
 (ert-deftest claude-code-ide-test-agents-command-includes-all-flag ()
   "The --all flag follows `claude-code-ide-session-list-include-completed'."
   (cl-letf (((symbol-function 'executable-find) (lambda (_) "/usr/bin/claude")))

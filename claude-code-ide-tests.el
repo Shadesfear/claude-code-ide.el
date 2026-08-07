@@ -1614,6 +1614,44 @@ next toggle, independent of which project the instances belong to."
     (claude-code-ide--session-list-cancel-timer)
     (should (null claude-code-ide--session-list-timer))))
 
+(ert-deftest claude-code-ide-test-agents-state-rank ()
+  "State rank puts attention-worthy sessions first, unknowns last."
+  (should (= 0 (claude-code-ide--session-state-rank '(:state "blocked"))))
+  (should (= 1 (claude-code-ide--session-state-rank '(:state "working"))))
+  ;; Some rows carry the state only in :status.
+  (should (= 1 (claude-code-ide--session-state-rank '(:status "busy"))))
+  (should (= 2 (claude-code-ide--session-state-rank '(:state "idle"))))
+  (should (= 3 (claude-code-ide--session-state-rank '(:state "failed"))))
+  (should (= 4 (claude-code-ide--session-state-rank '(:state "done"))))
+  (should (= 5 (claude-code-ide--session-state-rank '(:state "wat"))))
+  (should (= 5 (claude-code-ide--session-state-rank '()))))
+
+(ert-deftest claude-code-ide-test-agents-sort-state-then-age ()
+  "Rows order by state rank, then newest first inside a state."
+  (let* ((entries
+          (mapcar (lambda (s) (list s (vector "" "" "")))
+                  '((:name "old-done"    :state "done"    :startedAt 1000)
+                    (:name "new-working" :state "working" :startedAt 9000)
+                    (:name "blocked"     :state "blocked" :startedAt 5000)
+                    (:name "old-working" :state "working" :startedAt 2000)
+                    (:name "new-done"    :state "done"    :startedAt 8000))))
+         (sorted (sort (copy-sequence entries)
+                       #'claude-code-ide--session-sort-predicate)))
+    (should (equal '("blocked" "new-working" "old-working" "new-done" "old-done")
+                   (mapcar (lambda (e) (plist-get (car e) :name)) sorted)))))
+
+(ert-deftest claude-code-ide-test-agents-sort-key-is-state ()
+  "Both layouts sort on State, using the composite predicate."
+  (with-temp-buffer
+    (claude-code-ide-session-list-mode)
+    (should (equal '("State" . nil) tabulated-list-sort-key))
+    (dolist (format (list claude-code-ide--session-list-format-full
+                          claude-code-ide--session-list-format-compact))
+      (let ((state-column (seq-find (lambda (c) (equal "State" (car c)))
+                                    (append format nil))))
+        (should (eq 'claude-code-ide--session-sort-predicate
+                    (nth 2 state-column)))))))
+
 (ert-deftest claude-code-ide-test-agents-command-includes-all-flag ()
   "The --all flag follows `claude-code-ide-session-list-include-completed'."
   (cl-letf (((symbol-function 'executable-find) (lambda (_) "/usr/bin/claude")))

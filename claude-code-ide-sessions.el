@@ -240,10 +240,39 @@ redisplay stays synchronous and cheap.  Ages recompute on every print."
    (float-time)
    claude-code-ide--session-list-compact))
 
+(defconst claude-code-ide--session-state-order
+  '(("blocked" . 0)
+    ("working" . 1)
+    ("busy" . 1)
+    ("idle" . 2)
+    ("failed" . 3)
+    ("done" . 4))
+  "Sort rank for session states, most in need of attention first.
+Sessions whose state is not listed sort after all of these.")
+
+(defun claude-code-ide--session-state-rank (session)
+  "Return the sort rank of SESSION from `claude-code-ide--session-state-order'."
+  (let ((label (or (plist-get session :state) (plist-get session :status) "")))
+    (or (cdr (assoc-string label claude-code-ide--session-state-order t)) 5)))
+
+(defun claude-code-ide--session-sort-predicate (a b)
+  "Return non-nil when overview entry A sorts before B.
+Orders by state rank first, then newest session first within a state.
+A and B are `tabulated-list-entries' elements whose car is the session
+plist, so this reads the raw fields rather than the rendered columns."
+  (let* ((sa (car a))
+         (sb (car b))
+         (ra (claude-code-ide--session-state-rank sa))
+         (rb (claude-code-ide--session-state-rank sb)))
+    (if (/= ra rb)
+        (< ra rb)
+      (> (or (plist-get sa :startedAt) 0)
+         (or (plist-get sb :startedAt) 0)))))
+
 (defconst claude-code-ide--session-list-format-full
   [("Name" 28 t)
    ("Kind" 6 t)
-   ("State" 9 t)
+   ("State" 9 claude-code-ide--session-sort-predicate)
    ("Age" 6 t)
    ("Directory" 32 t)
    ("Session" 8 nil)]
@@ -251,7 +280,7 @@ redisplay stays synchronous and cheap.  Ages recompute on every print."
 
 (defconst claude-code-ide--session-list-format-compact
   [("Name" 22 t)
-   ("State" 9 t)
+   ("State" 9 claude-code-ide--session-sort-predicate)
    ("Age" 5 t)]
   "Column layout for the overview in a narrow sidebar.")
 
@@ -434,7 +463,7 @@ no timer."
   "CC-Agents"
   "Major mode for an overview of all Claude Code agent sessions."
   (setq tabulated-list-padding 2
-        tabulated-list-sort-key (cons "Name" nil)
+        tabulated-list-sort-key (cons "State" nil)
         tabulated-list-entries #'claude-code-ide--session-list-entries)
   (claude-code-ide--session-list-apply-format))
 
@@ -457,12 +486,16 @@ agents)."
       (claude-code-ide-session-list-refresh))
     (pop-to-buffer buffer)))
 
+(defvar claude-code-ide--session-list-return-window nil
+  "Window to return to when leaving the overview sidebar.")
+
 ;;;###autoload
-(defun claude-code-ide-session-list-sidebar ()
+(defun claude-code-ide-session-list-sidebar (&optional no-select)
   "Show the agent overview in a side window and keep it refreshed.
 The sidebar uses the narrow column layout and polls every
 `claude-code-ide-session-list-sidebar-refresh-interval' seconds while it
-stays visible.  Returns the sidebar window."
+stays visible.  Point moves into the sidebar unless NO-SELECT is non-nil.
+Returns the sidebar window."
   (interactive)
   (let ((buffer (get-buffer-create claude-code-ide-session-list-sidebar-buffer-name)))
     (with-current-buffer buffer
@@ -483,22 +516,47 @@ stays visible.  Returns the sidebar window."
         (with-current-buffer buffer
           (claude-code-ide--session-list-start-timer
            claude-code-ide-session-list-sidebar-refresh-interval)
-          (claude-code-ide-session-list-refresh)))
+          (claude-code-ide-session-list-refresh))
+        (unless no-select
+          (setq claude-code-ide--session-list-return-window (selected-window))
+          (select-window window)))
       window)))
+
+(defun claude-code-ide--session-list-sidebar-window ()
+  "Return the window showing the overview sidebar, or nil."
+  (let ((buffer (get-buffer claude-code-ide-session-list-sidebar-buffer-name)))
+    (and buffer (get-buffer-window buffer t))))
 
 ;;;###autoload
 (defun claude-code-ide-session-list-sidebar-toggle ()
-  "Toggle the agent overview sidebar.
+  "Toggle the agent overview sidebar, moving point into it when it opens.
 Closing it stops the refresh timer."
   (interactive)
-  (let* ((buffer (get-buffer claude-code-ide-session-list-sidebar-buffer-name))
-         (window (and buffer (get-buffer-window buffer t))))
+  (let ((window (claude-code-ide--session-list-sidebar-window)))
     (if window
         (progn
-          (with-current-buffer buffer
+          (with-current-buffer (window-buffer window)
             (claude-code-ide--session-list-cancel-timer))
           (delete-window window))
       (claude-code-ide-session-list-sidebar))))
+
+;;;###autoload
+(defun claude-code-ide-session-list-sidebar-toggle-focus ()
+  "Move point into the overview sidebar, or back out of it.
+Opens the sidebar first when it is not showing.  Leaves it open either
+way, so this switches focus without losing the list."
+  (interactive)
+  (let ((window (claude-code-ide--session-list-sidebar-window)))
+    (cond
+     ((null window)
+      (claude-code-ide-session-list-sidebar))
+     ((eq window (selected-window))
+      (if (window-live-p claude-code-ide--session-list-return-window)
+          (select-window claude-code-ide--session-list-return-window)
+        (other-window 1)))
+     (t
+      (setq claude-code-ide--session-list-return-window (selected-window))
+      (select-window window)))))
 
 (provide 'claude-code-ide-sessions)
 

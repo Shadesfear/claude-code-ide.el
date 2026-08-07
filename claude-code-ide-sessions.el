@@ -406,15 +406,27 @@ Signal a `user-error' when point is not on a session row."
   (or (tabulated-list-get-id)
       (user-error "No Claude session on this line")))
 
+(defun claude-code-ide--window-reusable-p (window)
+  "Return non-nil when WINDOW may be taken over by a session terminal.
+Side windows and dedicated windows may not: those hold the sidebar or
+another session, and replacing their buffer loses what the user was
+looking at."
+  (not (or (window-parameter window 'window-side)
+           (window-dedicated-p window))))
+
+(defun claude-code-ide--reusable-window ()
+  "Return the window a session terminal should take over, or nil.
+Prefers the selected window, then any other ordinary window, so a
+session opened from the sidebar still lands in the editing area rather
+than in the side window `display-buffer-alist' reserves."
+  (if (claude-code-ide--window-reusable-p (selected-window))
+      (selected-window)
+    (seq-find #'claude-code-ide--window-reusable-p (window-list nil 'never))))
+
 (defun claude-code-ide--same-window-action ()
-  "Return a `display-buffer' action reusing the selected window, or nil.
-Returns nil when the selected window is a side window or is dedicated,
-since taking those over would evict the sidebar or another session
-rather than the buffer the user was looking at."
-  (let ((window (selected-window)))
-    (unless (or (window-parameter window 'window-side)
-                (window-dedicated-p window))
-      '((display-buffer-same-window) (inhibit-same-window . nil)))))
+  "Return a `display-buffer' action reusing the selected window, or nil."
+  (when (claude-code-ide--window-reusable-p (selected-window))
+    '((display-buffer-same-window) (inhibit-same-window . nil))))
 
 (defun claude-code-ide--agent-launch (buffer-name args dir &optional same-window)
   "Run the Claude CLI with ARGS in terminal BUFFER-NAME rooted at DIR.
@@ -423,6 +435,12 @@ SAME-WINDOW, show the terminal in the selected window instead of letting
 `display-buffer-alist' place it, falling back to the usual placement
 when the selected window cannot be taken over."
   (claude-code-ide--terminal-ensure-backend)
+  ;; Step out of an unusable window first, so the terminal still lands in
+  ;; the editing area when the finder runs from the sidebar.
+  (when same-window
+    (when-let* ((target (claude-code-ide--reusable-window)))
+      (unless (eq target (selected-window))
+        (select-window target))))
   (let* ((cli (or claude-code-ide-cli-path "claude"))
          (dir (file-name-as-directory
                (or (and (stringp dir) (> (length dir) 0) dir)

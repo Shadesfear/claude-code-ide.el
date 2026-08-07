@@ -1725,16 +1725,29 @@ next toggle, independent of which project the instances belong to."
 (ert-deftest claude-code-ide-test-agents-same-window-action ()
   "Ordinary windows are reusable; side and dedicated windows are not."
   (let ((window (selected-window)))
+    (should (claude-code-ide--window-reusable-p window))
     (should (claude-code-ide--same-window-action))
     ;; A dedicated window belongs to its buffer, so leave it alone.
     (set-window-dedicated-p window t)
+    (should-not (claude-code-ide--window-reusable-p window))
     (should (null (claude-code-ide--same-window-action)))
     (set-window-dedicated-p window nil)
     ;; Same for a side window, which is the sidebar's case.
     (set-window-parameter window 'window-side 'left)
+    (should-not (claude-code-ide--window-reusable-p window))
     (should (null (claude-code-ide--same-window-action)))
     (set-window-parameter window 'window-side nil)
     (should (claude-code-ide--same-window-action))))
+
+(ert-deftest claude-code-ide-test-agents-reusable-window-prefers-selected ()
+  "The selected window wins when usable, otherwise another ordinary one."
+  (let ((window (selected-window)))
+    (should (eq window (claude-code-ide--reusable-window)))
+    ;; With the only window unusable there is nothing to fall back to.
+    (set-window-parameter window 'window-side 'left)
+    (should (null (claude-code-ide--reusable-window)))
+    (set-window-parameter window 'window-side nil)
+    (should (eq window (claude-code-ide--reusable-window)))))
 
 (ert-deftest claude-code-ide-test-agents-find-uses-current-window ()
   "The finder enters in the selected window; the overview does not."
